@@ -1,5 +1,5 @@
 use jayce::{Duo, Token, Tokenizer};
-use std::fmt::Debug;
+use std::{fmt::Debug, process::Command};
 
 macro_rules! to_string {
     ($enum_type:ident::$variant:ident) => {
@@ -14,7 +14,7 @@ enum Kind {
     CommentBlock,
     Newline,
 
-    // #[cfg(target_os = "linux")]
+    #[cfg(target_os = "linux")]
     SystemCall,
 
     ParenthesisOpen,
@@ -40,7 +40,7 @@ lazy_static::lazy_static! {
         Duo::new(Kind::CommentBlock, r"^/\*(.|\n)*?\*/", false),
         Duo::new(Kind::Newline, r"^\n", false),
 
-        // #[cfg(target_os = "linux")]
+        #[cfg(target_os = "linux")]
         Duo::new(Kind::SystemCall, r"^syscall", true),
 
         Duo::new(Kind::ParenthesisOpen, r"^\(", true),
@@ -66,7 +66,7 @@ enum ParserError {
     NoStatementsFound,
 }
 
-// #[cfg(target_os = "linux")]
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 #[allow(non_camel_case_types)]
 enum SysCalls {
@@ -183,11 +183,15 @@ impl Compiler {
     }
 }
 
+const SOURCE: &str = include_str!("../code/code.x");
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let tokenizer = Tokenizer::new(r#"syscall exit 100;"#, &DUOS);
+    let tokenizer = Tokenizer::new(SOURCE, &DUOS);
+
     let mut parser = Parser::new(tokenizer);
     let ast = parser.parse_program();
     println!("{:?}", ast);
+
     let mut compiler = Compiler::new();
     let output = compiler.compile(ast);
     println!("{:?}", output);
@@ -195,8 +199,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all("transpiled")?;
     std::fs::create_dir_all("object")?;
     std::fs::create_dir_all("bin")?;
-    let mut output_file = std::fs::File::create("transpiled/out.s")?;
-    std::io::Write::write_all(&mut output_file, output.as_bytes())?;
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut output_file = std::fs::File::create("transpiled/out.s")?;
+        std::io::Write::write_all(&mut output_file, output.as_bytes())?;
+
+        let nasm_output = Command::new("nasm")
+            .args(&["-felf64", "transpiled/out.s", "-o", "object/out.o"])
+            .output()
+            .expect("Failed to execute nasm");
+        println!("{:?}", nasm_output);
+
+        let ld_output = Command::new("ld")
+            .args(&["object/out.o", "-o", "bin/out"])
+            .output()
+            .expect("Failed to execute ld");
+        println!("{:?}", ld_output);
+
+        let binary_output = Command::new("./bin/out")
+            .output()
+            .expect("Failed to execute binary");
+        println!("{:?}", binary_output);
+
+        let exit_status = binary_output.status.code().unwrap();
+
+        println!("Exit status {:?}", exit_status);
+    }
 
     // println!("{:?}", to_string!(SysCalls::exit));
 

@@ -1,1 +1,1 @@
-exit(100);
+syscall exit 1;
