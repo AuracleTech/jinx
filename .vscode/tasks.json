@@ -2,14 +2,20 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
-			"type": "cargo",
-			"command": "run",
-			"problemMatcher": ["$rustc"],
+			"label": "nasm_ld",
+			"type": "shell",
+			"command": "nasm -felf64 transpiled/out.s -o object/out.o && ld object/out.o -o bin/out && ./bin/out && echo $?",
 			"group": {
 				"kind": "build",
 				"isDefault": true
 			},
-			"label": "rust: cargo run"
+			"dependsOn": ["cargo_run"]
+		},
+		{
+			"label": "cargo_run",
+			"type": "cargo",
+			"command": "run",
+			"problemMatcher": ["$rustc"]
 		}
 	]
 }
