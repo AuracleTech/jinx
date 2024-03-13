@@ -1,6 +1,5 @@
 use jayce::{Duo, Token, Tokenizer};
 use std::fmt::Debug;
-use strum_macros::EnumString;
 
 macro_rules! to_string {
     ($enum_type:ident::$variant:ident) => {
@@ -24,7 +23,7 @@ enum Kind {
     BracketOpen,
     BracketClose,
 
-    Alias,
+    AliasSnakeCase,
     Number,
 
     Assign,
@@ -50,7 +49,7 @@ lazy_static::lazy_static! {
         Duo::new(Kind::BracketOpen, r"^\{", true),
         Duo::new(Kind::BracketClose, r"^\}", true),
 
-        Duo::new(Kind::Alias, r"^[a-zA-Z_]+", true),
+        Duo::new(Kind::AliasSnakeCase, r"^[a-z][a-zA-Z0-9_]*", true),
         Duo::new(Kind::Number, r"^[0-9]+", true),
 
         Duo::new(Kind::Assign, r"^=", true),
@@ -68,10 +67,10 @@ enum ParserError {
 }
 
 // #[cfg(target_os = "linux")]
-#[derive(Debug, EnumString)]
+#[derive(Debug)]
+#[allow(non_camel_case_types)]
 enum SysCalls {
-    #[strum(ascii_case_insensitive)]
-    Exit(u32),
+    exit(u32),
 }
 
 #[derive(Debug)]
@@ -109,6 +108,15 @@ impl Parser {
         }
     }
 
+    fn expect_token_u32(&mut self) -> u32 {
+        let token = self.expect_token_kind(Kind::Number);
+        let number = token
+            .value
+            .parse::<u32>()
+            .expect(format!("expected u32 but got {:?}", token).as_str());
+        number
+    }
+
     fn parse_program(&mut self) -> Construct {
         let mut statements = Vec::new();
 
@@ -134,11 +142,11 @@ impl Parser {
     }
 
     fn parse_syscall(&mut self) -> Construct {
-        let syscall_alias = self.expect_token_kind(Kind::Alias);
+        let syscall_alias = self.expect_token_kind(Kind::AliasSnakeCase);
         match syscall_alias.value {
-            to_string!(SysCalls::Exit) => {
-                let _number = self.expect_token_kind(Kind::Number);
-                Construct::SystemCall(SysCalls::Exit(1))
+            to_string!(SysCalls::exit) => {
+                let number = self.expect_token_u32();
+                Construct::SystemCall(SysCalls::exit(number))
             }
             // Other syscalls
             _ => panic!("unknown syscall {:?}", syscall_alias.value),
@@ -146,12 +154,51 @@ impl Parser {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let tokenizer = Tokenizer::new(r#"syscall Exit 100;"#, &DUOS);
-    let mut parser = Parser::new(tokenizer);
-    println!("{:?}", parser.parse_program());
+struct Compiler {
+    output: String,
+}
 
-    // println!("{:?}", to_string!(SysCalls::Exit));
+impl Compiler {
+    fn new() -> Self {
+        Self {
+            output: String::new(),
+        }
+    }
+
+    fn compile(&mut self, construct: Construct) -> String {
+        match construct {
+            Construct::Program(statements) => {
+                self.output += &format!("global _start\n_start:\n");
+                for statement in statements {
+                    self.compile(statement);
+                }
+            }
+            Construct::SystemCall(syscall) => match syscall {
+                SysCalls::exit(number) => {
+                    self.output += &format!("\tmov rax, 60\n\tmov rdi, {}\n\tsyscall\n", number);
+                }
+            },
+        }
+        self.output.clone()
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tokenizer = Tokenizer::new(r#"syscall exit 100;"#, &DUOS);
+    let mut parser = Parser::new(tokenizer);
+    let ast = parser.parse_program();
+    println!("{:?}", ast);
+    let mut compiler = Compiler::new();
+    let output = compiler.compile(ast);
+    println!("{:?}", output);
+
+    std::fs::create_dir_all("transpiled")?;
+    std::fs::create_dir_all("object")?;
+    std::fs::create_dir_all("bin")?;
+    let mut output_file = std::fs::File::create("transpiled/out.s")?;
+    std::io::Write::write_all(&mut output_file, output.as_bytes())?;
+
+    // println!("{:?}", to_string!(SysCalls::exit));
 
     Ok(())
 }
