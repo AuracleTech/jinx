@@ -71,7 +71,12 @@ enum SysCalls {
 
 #[derive(Debug)]
 enum Construct {
-    Program(Vec<Construct>),
+    Program(Vec<Statement>),
+}
+
+#[derive(Debug)]
+enum Statement {
+    #[cfg(target_os = "linux")]
     SystemCall(SysCalls),
 }
 
@@ -127,22 +132,22 @@ impl Parser {
         Construct::Program(statements)
     }
 
-    fn parse_statement(&mut self) -> Construct {
+    fn parse_statement(&mut self) -> Statement {
         let token = self.expect_token();
-        let construct = match token.kind {
+        let statement = match token.kind {
             Kind::SystemCall => self.parse_syscall(),
             _ => panic!("unexpected statement as {:?}", token),
         };
         let _ = self.expect_token_kind(Kind::SemiColon);
-        construct
+        statement
     }
 
-    fn parse_syscall(&mut self) -> Construct {
+    fn parse_syscall(&mut self) -> Statement {
         let syscall_alias = self.expect_token_kind(Kind::AliasSnakeCase);
         match syscall_alias.value {
             to_string!(SysCalls::exit) => {
                 let number = self.expect_token_u32();
-                Construct::SystemCall(SysCalls::exit(number))
+                Statement::SystemCall(SysCalls::exit(number))
             }
             // Other syscalls
             _ => panic!("unknown syscall {:?}", syscall_alias.value),
@@ -150,32 +155,36 @@ impl Parser {
     }
 }
 
-struct Compiler {
-    output: String,
-}
+struct Transpiler;
 
-impl Compiler {
-    fn new() -> Self {
-        Self {
-            output: String::new(),
-        }
-    }
+impl Transpiler {
+    fn transpile_construct(&mut self, construct: Construct) -> String {
+        let mut output = String::from(format!(
+            "# {} {}\n\n",
+            chrono::Local::now().format("%e %B %Y"),
+            chrono::Local::now().format("%H:%M:%S")
+        ));
 
-    fn compile(&mut self, construct: Construct) -> String {
         match construct {
             Construct::Program(statements) => {
-                self.output += &format!("global _start\n_start:\n");
+                output += &format!("global _start\n_start:\n");
                 for statement in statements {
-                    self.compile(statement);
+                    output += self.transpile_statement(statement).as_str();
                 }
             }
-            Construct::SystemCall(syscall) => match syscall {
+        }
+
+        output.clone()
+    }
+
+    fn transpile_statement(&mut self, statement: Statement) -> String {
+        match statement {
+            Statement::SystemCall(syscall) => match syscall {
                 SysCalls::exit(number) => {
-                    self.output += &format!("\tmov rax, 60\n\tmov rdi, {}\n\tsyscall\n", number);
+                    format!("\tmov rax, 60\n\tmov rdi, {}\n\tsyscall\n\n", number)
                 }
             },
         }
-        self.output.clone()
     }
 }
 
@@ -186,11 +195,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut parser = Parser::new(tokenizer);
     let ast = parser.parse_program();
-    println!("{:?}", ast);
+    println!("AST {:?}", ast);
 
-    let mut compiler = Compiler::new();
-    let output = compiler.compile(ast);
-    println!("{:?}", output);
+    let mut compiler = Transpiler {};
+    let output = compiler.transpile_construct(ast);
+    println!("ASM {:?}", output);
 
     std::fs::create_dir_all("transpiled")?;
     std::fs::create_dir_all("object")?;
@@ -201,24 +210,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut output_file = std::fs::File::create("transpiled/out.s")?;
         std::io::Write::write_all(&mut output_file, output.as_bytes())?;
 
-        let nasm_output = Command::new("nasm")
+        let nasm = Command::new("nasm")
             .args(&["-felf64", "transpiled/out.s", "-o", "object/out.o"])
             .output()
             .expect("Failed to execute nasm");
-        println!("{:?}", nasm_output);
+        println!("{:?}", nasm);
 
-        let ld_output = Command::new("ld")
+        println!("nasm Stdout: {}", String::from_utf8_lossy(&nasm.stdout));
+        println!("nasm Stderr: {}", String::from_utf8_lossy(&nasm.stderr));
+
+        let ld = Command::new("ld")
             .args(&["object/out.o", "-o", "bin/out"])
             .output()
             .expect("Failed to execute ld");
-        println!("{:?}", ld_output);
+        println!("{:?}", ld);
 
-        let binary_output = Command::new("./bin/out")
+        println!("ld Stdout: {}", String::from_utf8_lossy(&ld.stdout));
+        println!("ld Stderr: {}", String::from_utf8_lossy(&ld.stderr));
+
+        let bin = Command::new("./bin/out")
             .output()
             .expect("Failed to execute binary");
-        println!("{:?}", binary_output);
+        println!("{:?}", bin);
 
-        let exit_status = binary_output.status.code().unwrap();
+        println!("bin Stdout: {}", String::from_utf8_lossy(&bin.stdout));
+        println!("bin Stderr: {}", String::from_utf8_lossy(&bin.stderr));
+
+        let exit_status = bin.status.code().unwrap();
 
         println!("Exit status {:?}", exit_status);
     }
