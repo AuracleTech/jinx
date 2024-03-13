@@ -159,15 +159,13 @@ struct Transpiler;
 
 impl Transpiler {
     fn transpile_construct(&mut self, construct: Construct) -> String {
-        let mut output = String::from(format!(
-            "# {} {}\n\n",
-            chrono::Local::now().format("%e %B %Y"),
-            chrono::Local::now().format("%H:%M:%S")
-        ));
+        let mut output = String::from("#");
+        output += &format!(" {}", chrono::Local::now().format("%e %b %Y"));
+        output += &format!(" {}\n", chrono::Local::now().format("%H:%M:%S"));
 
         match construct {
             Construct::Program(statements) => {
-                output += &format!("global _start\n_start:\n");
+                output += "\nglobal _start\n_start:";
                 for statement in statements {
                     output += self.transpile_statement(statement).as_str();
                 }
@@ -181,7 +179,7 @@ impl Transpiler {
         match statement {
             Statement::SystemCall(syscall) => match syscall {
                 SysCalls::exit(number) => {
-                    format!("\tmov rax, 60\n\tmov rdi, {}\n\tsyscall\n\n", number)
+                    format!("\n\tmov rax, 60\n\tmov rdi, {}\n\tsyscall\n\n", number)
                 }
             },
         }
