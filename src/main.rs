@@ -1,5 +1,5 @@
 use jayce::{Duo, Token, Tokenizer};
-use std::{fmt::Debug, process::Command};
+use std::{fmt::Debug, process::Command, sync::OnceLock};
 
 macro_rules! to_string {
     ($enum_type:ident::$variant:ident) => {
@@ -33,32 +33,28 @@ enum Kind {
     SemiColon,
 }
 
-lazy_static::lazy_static! {
-     static ref DUOS: Vec<Duo<Kind>> = vec![
-        Duo::new(Kind::Whitespace, r"^[^\S\n]+", false),
-        Duo::new(Kind::CommentLine, r"^//(.*)", false),
-        Duo::new(Kind::CommentBlock, r"^/\*(.|\n)*?\*/", false),
-        Duo::new(Kind::Newline, r"^\n", false),
-
-        #[cfg(target_os = "linux")]
-        Duo::new(Kind::SystemCall, r"^syscall", true),
-
-        Duo::new(Kind::ParenthesisOpen, r"^\(", true),
-        Duo::new(Kind::ParenthesisClose, r"^\)", true),
-
-        Duo::new(Kind::BracketOpen, r"^\{", true),
-        Duo::new(Kind::BracketClose, r"^\}", true),
-
-        Duo::new(Kind::AliasSnakeCase, r"^[a-z][a-zA-Z0-9_]*", true),
-        Duo::new(Kind::Number, r"^[0-9]+", true),
-
-        Duo::new(Kind::Assign, r"^=", true),
-        Duo::new(Kind::Add, r"^\+", true),
-        Duo::new(Kind::Sub, r"^-", true),
-
-        Duo::new(Kind::SemiColon, r"^;", true),
-
-    ];
+fn duos() -> &'static Vec<Duo<Kind>> {
+    static DUOS: OnceLock<Vec<Duo<Kind>>> = OnceLock::new();
+    DUOS.get_or_init(|| {
+        vec![
+            Duo::new(Kind::Whitespace, r"^[^\S\n]+", false),
+            Duo::new(Kind::CommentLine, r"^//(.*)", false),
+            Duo::new(Kind::CommentBlock, r"^/\*(.|\n)*?\*/", false),
+            Duo::new(Kind::Newline, r"^\n", false),
+            #[cfg(target_os = "linux")]
+            Duo::new(Kind::SystemCall, r"^syscall", true),
+            Duo::new(Kind::ParenthesisOpen, r"^\(", true),
+            Duo::new(Kind::ParenthesisClose, r"^\)", true),
+            Duo::new(Kind::BracketOpen, r"^\{", true),
+            Duo::new(Kind::BracketClose, r"^\}", true),
+            Duo::new(Kind::AliasSnakeCase, r"^[a-z][a-zA-Z0-9_]*", true),
+            Duo::new(Kind::Number, r"^[0-9]+", true),
+            Duo::new(Kind::Assign, r"^=", true),
+            Duo::new(Kind::Add, r"^\+", true),
+            Duo::new(Kind::Sub, r"^-", true),
+            Duo::new(Kind::SemiColon, r"^;", true),
+        ]
+    })
 }
 
 #[derive(Debug)]
@@ -186,7 +182,7 @@ impl Compiler {
 const SOURCE: &str = include_str!("../code/code.x");
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let tokenizer = Tokenizer::new(SOURCE, &DUOS);
+    let tokenizer = Tokenizer::new(SOURCE, duos());
 
     let mut parser = Parser::new(tokenizer);
     let ast = parser.parse_program();
