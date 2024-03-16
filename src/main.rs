@@ -180,7 +180,7 @@ impl Transpiler {
         }
     }
 
-    pub fn stringify_instructions(&mut self, instructions: Vec<Instructions>) {
+    pub fn transpile_instructions(&mut self, instructions: Vec<Instructions>) {
         for instruction in instructions {
             match instruction {
                 Instructions::Push(register) => {
@@ -204,7 +204,11 @@ impl Transpiler {
                     self.output += &format!("\tmov {}, {}\n", register, value);
                 }
                 Instructions::Syscall => {
-                    self.output += "\tsyscall\n\n";
+                    self.transpile_instructions(vec![
+                        Instructions::Mov(Registers::Rax.to_string(), 60),
+                        Instructions::Pop(Registers::Rdi.to_string()),
+                    ]);
+                    self.output += "\tsyscall\n";
                 }
             }
         }
@@ -214,51 +218,64 @@ impl Transpiler {
 
     fn transpile_construct(&mut self, construct: Construct) -> String {
         self.output += &format!(
-            "# {} at {}\n",
+            "# {} / {}\n\n",
+            chrono::Local::now().format("%H:%M:%S"),
             chrono::Local::now().format("%e %b %Y"),
-            chrono::Local::now().format("%H:%M:%S")
         );
 
         match construct {
             Construct::Program(statements) => {
-                self.output += "\nglobal _start\n_start:\n";
+                self.output += "global _start\n_start:\n";
                 for statement in statements {
                     self.transpile_statement(statement);
                 }
             }
         }
 
+        self.transpile_statement(Statement::SystemCall(SysCalls::Exit(Expressions::U32(0))));
+
         self.output.to_string()
+    }
+
+    fn transpile_expr(&mut self, expression: Expressions) {
+        match expression {
+            Expressions::U32(value) => {
+                self.transpile_instructions(vec![
+                    Instructions::Mov(Registers::Rax.to_string(), value),
+                    Instructions::Push(Registers::Rax.to_string()),
+                ]);
+            }
+            Expressions::Alias(alias) => {
+                if let Some(var) = self.vars.get(&alias) {
+                    self.transpile_instructions(vec![Instructions::Push(format!(
+                        "QWORD [{}+{}]",
+                        Registers::Rsp,
+                        (self.stack_len - var.stack_location as usize - 1) * 8
+                    ))]);
+                } else {
+                    panic!("undeclared alias '{}'", alias);
+                }
+            }
+            _ => unimplemented!(),
+        }
     }
 
     fn transpile_statement(&mut self, statement: Statement) {
         match statement {
             Statement::Let(alias, expression) => {
                 if let Some(var) = self.vars.get(&alias) {
-                    panic!("variable named '{}' already declared {:?}", alias, var);
+                    panic!("alias '{}' already declared {:?}", alias, var);
                 }
 
                 let stack_location = self.stack_len as u32;
                 self.vars.insert(alias.to_owned(), Var { stack_location });
-
-                let u32_value = match expression {
-                    Expressions::U32(value) => value,
-                    _ => panic!("expected integer expression but got {:?}", expression),
-                };
-
-                self.stringify_instructions(vec![
-                    Instructions::Mov(Registers::Rax, u32_value),
-                    Instructions::Push(Registers::Rax),
-                ])
-
-                // format!("\n\tmov rax, {}\n\tpush rax\n", number)
+                self.transpile_expr(expression);
             }
             Statement::SystemCall(syscall) => match syscall {
-                SysCalls::Exit(_number) => self.stringify_instructions(vec![
-                    Instructions::Mov(Registers::Rax, 60),
-                    Instructions::Pop(Registers::Rdi),
-                    Instructions::Syscall,
-                ]),
+                SysCalls::Exit(number) => {
+                    self.transpile_expr(number);
+                    self.transpile_instructions(vec![Instructions::Syscall]);
+                }
             },
         }
     }

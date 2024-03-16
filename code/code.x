@@ -1,5 +1,5 @@
-let x = 9;
+let x = 7;
 
-let y = 1;
+let y = 8;
 
-syscall exit x;
+// syscall exit x;
