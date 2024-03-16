@@ -272,15 +272,19 @@ const SOURCE: &str = include_str!("../code/code.x");
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lexer = Kind::lexer(SOURCE);
 
+    let start_time = std::time::Instant::now();
     let mut parser = Parser::new(lexer);
     let ast = parser.parse_program();
+    println!("Parser took {:?}", start_time.elapsed());
     std::fs::create_dir_all("ast")?;
     let mut output_file = std::fs::File::create("ast/out.json")?;
     let json = serde_json::to_string(&ast).unwrap();
     std::io::Write::write_all(&mut output_file, json.as_bytes())?;
 
+    let start_time = std::time::Instant::now();
     let mut compiler = Transpiler::new();
     let output = compiler.transpile_construct(ast);
+    println!("Compiler took {:?}", start_time.elapsed());
 
     std::fs::create_dir_all("transpiled")?;
     std::fs::create_dir_all("object")?;
