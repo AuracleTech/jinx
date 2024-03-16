@@ -1,11 +1,10 @@
+mod assembly;
+mod utterances;
+use assembly::{Instructions, Registers};
 use jayce::{Duo, Token, Tokenizer};
-use std::{fmt::Debug, process::Command, sync::OnceLock};
-
-macro_rules! to_string {
-    ($enum_type:ident::$variant:ident) => {
-        stringify!($variant)
-    };
-}
+use std::{collections::HashMap, fmt::Debug, process::Command, sync::OnceLock};
+use utterances::{Construct, Expressions};
+use utterances::{Statement, SysCalls};
 
 #[derive(Clone, Debug, PartialEq)]
 enum Kind {
@@ -13,6 +12,8 @@ enum Kind {
     CommentLine,
     CommentBlock,
     Newline,
+
+    KeywordLet,
 
     #[cfg(target_os = "linux")]
     SystemCall,
@@ -41,17 +42,25 @@ fn duos() -> &'static Vec<Duo<Kind>> {
             Duo::new(Kind::CommentLine, r"^//(.*)", false),
             Duo::new(Kind::CommentBlock, r"^/\*(.|\n)*?\*/", false),
             Duo::new(Kind::Newline, r"^\n", false),
+            //
+            Duo::new(Kind::KeywordLet, r"^let", true),
+            //
             #[cfg(target_os = "linux")]
             Duo::new(Kind::SystemCall, r"^syscall", true),
+            //
             Duo::new(Kind::ParenthesisOpen, r"^\(", true),
             Duo::new(Kind::ParenthesisClose, r"^\)", true),
+            //
             Duo::new(Kind::BracketOpen, r"^\{", true),
             Duo::new(Kind::BracketClose, r"^\}", true),
+            //
             Duo::new(Kind::AliasSnakeCase, r"^[a-z][a-zA-Z0-9_]*", true),
             Duo::new(Kind::Number, r"^[0-9]+", true),
+            //
             Duo::new(Kind::Assign, r"^=", true),
             Duo::new(Kind::Add, r"^\+", true),
             Duo::new(Kind::Sub, r"^-", true),
+            //
             Duo::new(Kind::SemiColon, r"^;", true),
         ]
     })
@@ -60,24 +69,6 @@ fn duos() -> &'static Vec<Duo<Kind>> {
 #[derive(Debug)]
 enum ParserError {
     NoStatementsFound,
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Debug)]
-#[allow(non_camel_case_types)]
-enum SysCalls {
-    exit(u32),
-}
-
-#[derive(Debug)]
-enum Construct {
-    Program(Vec<Statement>),
-}
-
-#[derive(Debug)]
-enum Statement {
-    #[cfg(target_os = "linux")]
-    SystemCall(SysCalls),
 }
 
 struct Parser {
@@ -97,25 +88,13 @@ impl Parser {
         }
     }
 
-    fn expect_token_kind(&mut self, kind: Kind) -> Token<Kind> {
+    fn expect_token_kind(&mut self, kind: Kind) -> Result<Token<Kind>, String> {
         let token = self.expect_token();
         if token.kind == &kind {
-            return token;
+            Ok(token)
         } else {
-            panic!(
-                "expected {:?} but got {:?} at line {} column {}",
-                kind, token.kind, token.pos.0, token.pos.1
-            );
+            Err(format!("expected {:?} but got {:?}", kind, token))
         }
-    }
-
-    fn expect_token_u32(&mut self) -> u32 {
-        let token = self.expect_token_kind(Kind::Number);
-        let number = token
-            .value
-            .parse::<u32>()
-            .expect(format!("expected u32 but got {:?}", token).as_str());
-        number
     }
 
     fn parse_program(&mut self) -> Construct {
@@ -135,6 +114,7 @@ impl Parser {
     fn parse_statement(&mut self) -> Statement {
         let token = self.expect_token();
         let statement = match token.kind {
+            Kind::KeywordLet => self.parse_let(),
             Kind::SystemCall => self.parse_syscall(),
             _ => panic!("unexpected statement as {:?}", token),
         };
@@ -142,45 +122,143 @@ impl Parser {
         statement
     }
 
+    fn parse_let(&mut self) -> Statement {
+        let alias = self
+            .expect_token_kind(Kind::AliasSnakeCase)
+            .unwrap()
+            .value
+            .to_string();
+        let _ = self.expect_token_kind(Kind::Assign);
+
+        let value = self.parse_expr();
+
+        Statement::Let(alias, value)
+    }
+
+    fn parse_expr(&mut self) -> Expressions {
+        let token = self.expect_token();
+        match token.kind {
+            Kind::Number => Expressions::U32(token.value.parse().unwrap()),
+            Kind::AliasSnakeCase => Expressions::Alias(token.value.to_string()),
+            _ => panic!("unexpected expression as {:?}", token),
+        }
+    }
+
     fn parse_syscall(&mut self) -> Statement {
-        let syscall_alias = self.expect_token_kind(Kind::AliasSnakeCase);
-        match syscall_alias.value {
-            to_string!(SysCalls::exit) => {
-                let number = self.expect_token_u32();
-                Statement::SystemCall(SysCalls::exit(number))
+        let token = self.expect_token_kind(Kind::AliasSnakeCase).unwrap();
+        match token.value {
+            "exit" => {
+                let expression = self.parse_expr();
+                Statement::SystemCall(SysCalls::Exit(expression))
             }
-            // Other syscalls
-            _ => panic!("unknown syscall {:?}", syscall_alias.value),
+            _ => panic!("unknown syscall token value {:?}", token),
         }
     }
 }
 
-struct Transpiler;
+#[derive(Debug)]
+struct Var {
+    stack_location: u32,
+}
+
+struct Transpiler {
+    output: String,
+    vars: HashMap<String, Var>,
+
+    stack_len: usize,
+    max_stack_size: usize,
+}
 
 impl Transpiler {
-    fn transpile_construct(&mut self, construct: Construct) -> String {
-        let mut output = String::from("#");
-        output += &format!(" {}", chrono::Local::now().format("%e %b %Y"));
-        output += &format!(" {}\n", chrono::Local::now().format("%H:%M:%S"));
+    fn new() -> Self {
+        let max_stack_size = 100; // TODO: make this configurable
+        Self {
+            output: String::new(),
+            vars: HashMap::new(),
+            stack_len: 0,
+            max_stack_size,
+        }
+    }
 
-        match construct {
-            Construct::Program(statements) => {
-                output += "\nglobal _start\n_start:";
-                for statement in statements {
-                    output += self.transpile_statement(statement).as_str();
+    pub fn stringify_instructions(&mut self, instructions: Vec<Instructions>) {
+        for instruction in instructions {
+            match instruction {
+                Instructions::Push(register) => {
+                    self.stack_len += 1;
+
+                    if self.stack_len > self.max_stack_size {
+                        panic!("stack overflow");
+                    }
+
+                    self.output += &format!("\tpush {}\n", register);
+                }
+                Instructions::Pop(register) => {
+                    if self.stack_len == 0 {
+                        panic!("stack underflow");
+                    }
+
+                    self.stack_len -= 1;
+                    self.output += &format!("\tpop {}\n", register);
+                }
+                Instructions::Mov(register, value) => {
+                    self.output += &format!("\tmov {}, {}\n", register, value);
+                }
+                Instructions::Syscall => {
+                    self.output += "\tsyscall\n\n";
                 }
             }
         }
 
-        output.clone()
+        self.output += "\n";
     }
 
-    fn transpile_statement(&mut self, statement: Statement) -> String {
-        match statement {
-            Statement::SystemCall(syscall) => match syscall {
-                SysCalls::exit(number) => {
-                    format!("\n\tmov rax, 60\n\tmov rdi, {}\n\tsyscall\n\n", number)
+    fn transpile_construct(&mut self, construct: Construct) -> String {
+        self.output += &format!(
+            "# {} at {}\n",
+            chrono::Local::now().format("%e %b %Y"),
+            chrono::Local::now().format("%H:%M:%S")
+        );
+
+        match construct {
+            Construct::Program(statements) => {
+                self.output += "\nglobal _start\n_start:\n";
+                for statement in statements {
+                    self.transpile_statement(statement);
                 }
+            }
+        }
+
+        self.output.to_string()
+    }
+
+    fn transpile_statement(&mut self, statement: Statement) {
+        match statement {
+            Statement::Let(alias, expression) => {
+                if let Some(var) = self.vars.get(&alias) {
+                    panic!("variable named '{}' already declared {:?}", alias, var);
+                }
+
+                let stack_location = self.stack_len as u32;
+                self.vars.insert(alias.to_owned(), Var { stack_location });
+
+                let u32_value = match expression {
+                    Expressions::U32(value) => value,
+                    _ => panic!("expected integer expression but got {:?}", expression),
+                };
+
+                self.stringify_instructions(vec![
+                    Instructions::Mov(Registers::Rax, u32_value),
+                    Instructions::Push(Registers::Rax),
+                ])
+
+                // format!("\n\tmov rax, {}\n\tpush rax\n", number)
+            }
+            Statement::SystemCall(syscall) => match syscall {
+                SysCalls::Exit(_number) => self.stringify_instructions(vec![
+                    Instructions::Mov(Registers::Rax, 60),
+                    Instructions::Pop(Registers::Rdi),
+                    Instructions::Syscall,
+                ]),
             },
         }
     }
@@ -195,7 +273,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ast = parser.parse_program();
     println!("AST {:?}", ast);
 
-    let mut compiler = Transpiler {};
+    let mut compiler = Transpiler::new();
     let output = compiler.transpile_construct(ast);
     println!("ASM {:?}", output);
 
@@ -212,8 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .args(&["-felf64", "transpiled/out.s", "-o", "object/out.o"])
             .output()
             .expect("Failed to execute nasm");
-        println!("{:?}", nasm);
-
+        println!("nasm Command Output: {:?}", nasm);
         println!("nasm Stdout: {}", String::from_utf8_lossy(&nasm.stdout));
         println!("nasm Stderr: {}", String::from_utf8_lossy(&nasm.stderr));
 
@@ -221,16 +298,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .args(&["object/out.o", "-o", "bin/out"])
             .output()
             .expect("Failed to execute ld");
-        println!("{:?}", ld);
-
+        println!("ld Command Output: {:?}", ld);
         println!("ld Stdout: {}", String::from_utf8_lossy(&ld.stdout));
         println!("ld Stderr: {}", String::from_utf8_lossy(&ld.stderr));
 
         let bin = Command::new("./bin/out")
             .output()
             .expect("Failed to execute binary");
-        println!("{:?}", bin);
-
+        println!("bin Command Output: {:?}", bin);
         println!("bin Stdout: {}", String::from_utf8_lossy(&bin.stdout));
         println!("bin Stderr: {}", String::from_utf8_lossy(&bin.stderr));
 
