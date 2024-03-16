@@ -1,23 +1,23 @@
-#[cfg(target_os = "linux")]
-#[derive(Debug)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
 #[allow(non_camel_case_types)]
 pub enum SysCalls {
     Exit(Expressions),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Construct {
     Program(Vec<Statement>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Statement {
     Let(String, Expressions),
-    #[cfg(target_os = "linux")]
     SystemCall(SysCalls),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum _BinaryOperator {
     _Add,
     _Sub,
@@ -25,7 +25,7 @@ pub enum _BinaryOperator {
     _Div,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Expressions {
     U32(u32),
     _F64(f64),

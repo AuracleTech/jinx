@@ -1,69 +1,49 @@
 mod assembly;
 mod utterances;
 use assembly::{Instructions, Registers};
-use jayce::{Duo, Token, Tokenizer};
-use std::{collections::HashMap, fmt::Debug, process::Command, sync::OnceLock};
+use logos::{Lexer, Logos, Skip};
+use std::{collections::HashMap, fmt::Debug, process::Command};
 use utterances::{Construct, Expressions};
 use utterances::{Statement, SysCalls};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Logos, Clone, Debug, PartialEq)]
+#[logos(skip r"[ \t\n\f]+")]
 enum Kind {
-    Whitespace,
+    #[regex(r"//.*", |_| Skip, priority = 3)]
     CommentLine,
+    #[regex(r"/\*[^*]*\*/", |_| Skip, priority = 3)]
     CommentBlock,
-    Newline,
 
+    #[token("let")]
     KeywordLet,
 
-    #[cfg(target_os = "linux")]
+    #[token("syscall")]
     SystemCall,
 
+    #[token("(")]
     ParenthesisOpen,
+    #[token(")")]
     ParenthesisClose,
 
+    #[token("{")]
     BracketOpen,
+    #[token("}")]
     BracketClose,
 
+    #[regex(r"[a-z][a-zA-Z0-9_]*")]
     AliasSnakeCase,
+    #[regex(r"[0-9]+")]
     Number,
 
+    #[token("=")]
     Assign,
+    #[token("+")]
     Add,
+    #[token("-")]
     Sub,
 
+    #[token(";")]
     SemiColon,
-}
-
-fn duos() -> &'static Vec<Duo<Kind>> {
-    static DUOS: OnceLock<Vec<Duo<Kind>>> = OnceLock::new();
-    DUOS.get_or_init(|| {
-        vec![
-            Duo::new(Kind::Whitespace, r"^[^\S\n]+", false),
-            Duo::new(Kind::CommentLine, r"^//(.*)", false),
-            Duo::new(Kind::CommentBlock, r"^/\*(.|\n)*?\*/", false),
-            Duo::new(Kind::Newline, r"^\n", false),
-            //
-            Duo::new(Kind::KeywordLet, r"^let", true),
-            //
-            #[cfg(target_os = "linux")]
-            Duo::new(Kind::SystemCall, r"^syscall", true),
-            //
-            Duo::new(Kind::ParenthesisOpen, r"^\(", true),
-            Duo::new(Kind::ParenthesisClose, r"^\)", true),
-            //
-            Duo::new(Kind::BracketOpen, r"^\{", true),
-            Duo::new(Kind::BracketClose, r"^\}", true),
-            //
-            Duo::new(Kind::AliasSnakeCase, r"^[a-z][a-zA-Z0-9_]*", true),
-            Duo::new(Kind::Number, r"^[0-9]+", true),
-            //
-            Duo::new(Kind::Assign, r"^=", true),
-            Duo::new(Kind::Add, r"^\+", true),
-            Duo::new(Kind::Sub, r"^-", true),
-            //
-            Duo::new(Kind::SemiColon, r"^;", true),
-        ]
-    })
 }
 
 #[derive(Debug)]
@@ -71,37 +51,42 @@ enum ParserError {
     NoStatementsFound,
 }
 
-struct Parser {
-    tokenizer: Tokenizer<'static, Kind>,
+struct Parser<'a> {
+    lexer: Lexer<'a, Kind>,
 }
 
-impl Parser {
-    fn new(tokenizer: Tokenizer<'static, Kind>) -> Self {
-        Self { tokenizer }
+impl<'a> Parser<'a> {
+    fn new(lexer: Lexer<'a, Kind>) -> Self {
+        Self { lexer }
     }
 
-    fn expect_token(&mut self) -> Token<Kind> {
-        if let Some(token) = self.tokenizer.consume().unwrap() {
-            return token;
+    fn expect_token(&mut self) -> Kind {
+        if let Some(token) = self.lexer.next() {
+            token.expect("expected token but got None")
         } else {
             panic!("expected token but got None");
         }
     }
 
-    fn expect_token_kind(&mut self, kind: Kind) -> Result<Token<Kind>, String> {
-        let token = self.expect_token();
-        if token.kind == &kind {
-            Ok(token)
+    fn expect_token_kind(&mut self, expected: Kind) -> Kind {
+        let kind = self.expect_token();
+        if kind == expected {
+            kind
         } else {
-            Err(format!("expected {:?} but got {:?}", kind, token))
+            panic!(
+                "expected {:?} but got {:?} value {:?}",
+                expected,
+                kind,
+                self.lexer.slice()
+            );
         }
     }
 
     fn parse_program(&mut self) -> Construct {
         let mut statements = Vec::new();
 
-        while let Some(_) = self.tokenizer.peek().unwrap() {
-            statements.push(self.parse_statement());
+        while let Some(kind) = self.lexer.next() {
+            statements.push(self.parse_statement(kind.expect("expected kind but got None")));
         }
 
         if statements.is_empty() {
@@ -111,23 +96,23 @@ impl Parser {
         Construct::Program(statements)
     }
 
-    fn parse_statement(&mut self) -> Statement {
-        let token = self.expect_token();
-        let statement = match token.kind {
+    fn parse_statement(&mut self, kind: Kind) -> Statement {
+        let statement = match kind {
             Kind::KeywordLet => self.parse_let(),
             Kind::SystemCall => self.parse_syscall(),
-            _ => panic!("unexpected statement as {:?}", token),
+            _ => panic!(
+                "unexpected statement kind {:?} value {:?}",
+                kind,
+                self.lexer.slice()
+            ),
         };
         let _ = self.expect_token_kind(Kind::SemiColon);
         statement
     }
 
     fn parse_let(&mut self) -> Statement {
-        let alias = self
-            .expect_token_kind(Kind::AliasSnakeCase)
-            .unwrap()
-            .value
-            .to_string();
+        self.expect_token_kind(Kind::AliasSnakeCase);
+        let alias = self.lexer.slice().to_string();
         let _ = self.expect_token_kind(Kind::Assign);
 
         let value = self.parse_expr();
@@ -136,22 +121,23 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Expressions {
-        let token = self.expect_token();
-        match token.kind {
-            Kind::Number => Expressions::U32(token.value.parse().unwrap()),
-            Kind::AliasSnakeCase => Expressions::Alias(token.value.to_string()),
-            _ => panic!("unexpected expression as {:?}", token),
+        let kind = self.expect_token();
+        match kind {
+            Kind::Number => Expressions::U32(self.lexer.slice().parse().expect("expected u32")),
+            Kind::AliasSnakeCase => Expressions::Alias(self.lexer.slice().to_string()),
+            _ => panic!("unexpected expression kind {:?}", kind),
         }
     }
 
     fn parse_syscall(&mut self) -> Statement {
-        let token = self.expect_token_kind(Kind::AliasSnakeCase).unwrap();
-        match token.value {
+        self.expect_token_kind(Kind::AliasSnakeCase);
+        let value = self.lexer.slice();
+        match value {
             "exit" => {
                 let expression = self.parse_expr();
                 Statement::SystemCall(SysCalls::Exit(expression))
             }
-            _ => panic!("unknown syscall token value {:?}", token),
+            _ => panic!("unknown syscall token value {:?}", value),
         }
     }
 }
@@ -284,52 +270,50 @@ impl Transpiler {
 const SOURCE: &str = include_str!("../code/code.x");
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let tokenizer = Tokenizer::new(SOURCE, duos());
+    let lexer = Kind::lexer(SOURCE);
 
-    let mut parser = Parser::new(tokenizer);
+    let mut parser = Parser::new(lexer);
     let ast = parser.parse_program();
-    println!("AST {:?}", ast);
+    std::fs::create_dir_all("ast")?;
+    let mut output_file = std::fs::File::create("ast/out.json")?;
+    let json = serde_json::to_string(&ast).unwrap();
+    std::io::Write::write_all(&mut output_file, json.as_bytes())?;
 
     let mut compiler = Transpiler::new();
     let output = compiler.transpile_construct(ast);
-    println!("ASM {:?}", output);
 
     std::fs::create_dir_all("transpiled")?;
     std::fs::create_dir_all("object")?;
     std::fs::create_dir_all("bin")?;
 
-    #[cfg(target_os = "linux")]
-    {
-        let mut output_file = std::fs::File::create("transpiled/out.s")?;
-        std::io::Write::write_all(&mut output_file, output.as_bytes())?;
+    let mut output_file = std::fs::File::create("transpiled/out.s")?;
+    std::io::Write::write_all(&mut output_file, output.as_bytes())?;
 
-        let nasm = Command::new("nasm")
-            .args(&["-felf64", "transpiled/out.s", "-o", "object/out.o"])
-            .output()
-            .expect("Failed to execute nasm");
-        println!("nasm Command Output: {:?}", nasm);
-        println!("nasm Stdout: {}", String::from_utf8_lossy(&nasm.stdout));
-        println!("nasm Stderr: {}", String::from_utf8_lossy(&nasm.stderr));
+    let nasm = Command::new("nasm")
+        .args(&["-felf64", "transpiled/out.s", "-o", "object/out.o"])
+        .output()
+        .expect("Failed to execute nasm");
+    println!("nasm Command Output: {:?}", nasm);
+    println!("nasm Stdout: {}", String::from_utf8_lossy(&nasm.stdout));
+    println!("nasm Stderr: {}", String::from_utf8_lossy(&nasm.stderr));
 
-        let ld = Command::new("ld")
-            .args(&["object/out.o", "-o", "bin/out"])
-            .output()
-            .expect("Failed to execute ld");
-        println!("ld Command Output: {:?}", ld);
-        println!("ld Stdout: {}", String::from_utf8_lossy(&ld.stdout));
-        println!("ld Stderr: {}", String::from_utf8_lossy(&ld.stderr));
+    let ld = Command::new("ld")
+        .args(&["object/out.o", "-o", "bin/out"])
+        .output()
+        .expect("Failed to execute ld");
+    println!("ld Command Output: {:?}", ld);
+    println!("ld Stdout: {}", String::from_utf8_lossy(&ld.stdout));
+    println!("ld Stderr: {}", String::from_utf8_lossy(&ld.stderr));
 
-        let bin = Command::new("./bin/out")
-            .output()
-            .expect("Failed to execute binary");
-        println!("bin Command Output: {:?}", bin);
-        println!("bin Stdout: {}", String::from_utf8_lossy(&bin.stdout));
-        println!("bin Stderr: {}", String::from_utf8_lossy(&bin.stderr));
+    let bin = Command::new("./bin/out")
+        .output()
+        .expect("Failed to execute binary");
+    println!("bin Command Output: {:?}", bin);
+    println!("bin Stdout: {}", String::from_utf8_lossy(&bin.stdout));
+    println!("bin Stderr: {}", String::from_utf8_lossy(&bin.stderr));
 
-        let exit_status = bin.status.code().unwrap();
-
-        println!("Exit status {:?}", exit_status);
-    }
+    let exit_status = bin.status.code().unwrap();
+    println!("Exit status {:?}", exit_status);
 
     // println!("{:?}", to_string!(SysCalls::exit));
 
