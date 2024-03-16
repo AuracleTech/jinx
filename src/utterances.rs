@@ -18,18 +18,18 @@ pub enum Statement {
 }
 
 #[derive(Debug)]
-pub enum BinaryOperator {
-    Add,
-    Sub,
-    Mul,
-    Div,
+pub enum _BinaryOperator {
+    _Add,
+    _Sub,
+    _Mul,
+    _Div,
 }
 
 #[derive(Debug)]
 pub enum Expressions {
     U32(u32),
-    F64(f64),
-    Boolean(bool),
+    _F64(f64),
+    _Boolean(bool),
     Alias(String),
-    BinaryOp(BinaryOperator, Box<Expressions>, Box<Expressions>), // Example of a binary operation expression
+    _BinaryOp(_BinaryOperator, Box<Expressions>, Box<Expressions>), // Example of a binary operation expression
 }
