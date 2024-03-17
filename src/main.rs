@@ -3,8 +3,8 @@ mod utterances;
 use assembly::{Instructions, Registers};
 use logos::{Lexer, Logos, Skip};
 use std::{collections::HashMap, fmt::Debug, process::Command};
-use utterances::{Construct, Expressions};
-use utterances::{Statement, SysCalls};
+use utterances::{ArithmeticOperator, Construct, Expression, Literal};
+use utterances::{Statement, SysCall};
 
 #[derive(Logos, Clone, Debug, PartialEq)]
 #[logos(skip r"[ \t\n\f]+")]
@@ -41,6 +41,10 @@ enum Kind {
     Add,
     #[token("-")]
     Sub,
+    #[token("*")]
+    Mul,
+    #[token("/")]
+    Div,
 
     #[token(";")]
     SemiColon,
@@ -82,11 +86,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_program(&mut self) -> Construct {
+    fn program(&mut self) -> Construct {
         let mut statements = Vec::new();
 
         while let Some(kind) = self.lexer.next() {
-            statements.push(self.parse_statement(kind.expect("expected kind but got None")));
+            statements.push(self.statement(kind.expect("expected kind but got error")));
         }
 
         if statements.is_empty() {
@@ -96,47 +100,66 @@ impl<'a> Parser<'a> {
         Construct::Program(statements)
     }
 
-    fn parse_statement(&mut self, kind: Kind) -> Statement {
+    fn statement(&mut self, kind: Kind) -> Statement {
         let statement = match kind {
-            Kind::KeywordLet => self.parse_let(),
-            Kind::SystemCall => self.parse_syscall(),
+            Kind::KeywordLet => self.assign(),
+            Kind::SystemCall => self.syscall(),
             _ => panic!(
                 "unexpected statement kind {:?} value {:?}",
                 kind,
                 self.lexer.slice()
             ),
         };
-        let _ = self.expect_token_kind(Kind::SemiColon);
         statement
     }
 
-    fn parse_let(&mut self) -> Statement {
+    fn assign(&mut self) -> Statement {
         self.expect_token_kind(Kind::AliasSnakeCase);
         let alias = self.lexer.slice().to_string();
         let _ = self.expect_token_kind(Kind::Assign);
 
-        let value = self.parse_expr();
-
-        Statement::Let(alias, value)
+        Statement::Let(alias, self.expression())
     }
 
-    fn parse_expr(&mut self) -> Expressions {
-        let kind = self.expect_token();
-        match kind {
-            Kind::Number => Expressions::U32(self.lexer.slice().parse().expect("expected u32")),
-            Kind::AliasSnakeCase => Expressions::Alias(self.lexer.slice().to_string()),
-            _ => panic!("unexpected expression kind {:?}", kind),
-        }
+    fn expression(&mut self) -> Expression {
+        let token = self.expect_token();
+        let left = match token {
+            Kind::Number => {
+                let value = self.lexer.slice().parse().expect("Failed to parse integer");
+                Expression::Literal(Literal::U32(value))
+            }
+            Kind::AliasSnakeCase => Expression::Alias(self.lexer.slice().to_string()),
+            // Kind::ParenthesisOpen => {
+            //     let expr = self.expression();
+            //     left = self.expect_token();
+            //     if left != Kind::ParenthesisClose {
+            //         panic!("Expected ')' after expression, found {:?}", left);
+            //     }
+            //     expr
+            // }
+            _ => panic!("Unexpected token {:?} in expression", token),
+        };
+
+        let next = self.expect_token();
+        let operator = match next {
+            Kind::Add => ArithmeticOperator::Add,
+            Kind::Sub => ArithmeticOperator::Sub,
+            Kind::Mul => ArithmeticOperator::Mul,
+            Kind::Div => ArithmeticOperator::Div,
+            Kind::SemiColon => return left,
+            _ => panic!("Unexpected token {:?} in expression", next),
+        };
+
+        let right = self.expression();
+
+        Expression::BinaryOp(operator, Box::new(left), Box::new(right))
     }
 
-    fn parse_syscall(&mut self) -> Statement {
+    fn syscall(&mut self) -> Statement {
         self.expect_token_kind(Kind::AliasSnakeCase);
         let value = self.lexer.slice();
         match value {
-            "exit" => {
-                let expression = self.parse_expr();
-                Statement::SystemCall(SysCalls::Exit(expression))
-            }
+            "exit" => Statement::SystemCall(SysCall::Exit(self.expression())),
             _ => panic!("unknown syscall token value {:?}", value),
         }
     }
@@ -218,20 +241,25 @@ impl Transpiler {
             }
         }
 
-        self.transpile_statement(Statement::SystemCall(SysCalls::Exit(Expressions::U32(0))));
+        self.transpile_statement(Statement::SystemCall(SysCall::Exit(Expression::Literal(
+            Literal::U32(0),
+        ))));
 
         self.output.to_string()
     }
 
-    fn transpile_expr(&mut self, expression: Expressions) {
+    fn transpile_expr(&mut self, expression: Expression) {
         match expression {
-            Expressions::U32(value) => {
-                self.transpile_instructions(vec![
-                    Instructions::Mov(Registers::Rax.to_string(), value),
-                    Instructions::Push(Registers::Rax.to_string()),
-                ]);
-            }
-            Expressions::Alias(alias) => {
+            Expression::Literal(literal) => match literal {
+                Literal::U32(value) => {
+                    self.transpile_instructions(vec![
+                        Instructions::Mov(Registers::Rax.to_string(), value),
+                        Instructions::Push(Registers::Rax.to_string()),
+                    ]);
+                }
+                _ => unimplemented!(),
+            },
+            Expression::Alias(alias) => {
                 if let Some(var) = self.vars.get(&alias) {
                     self.transpile_instructions(vec![Instructions::Push(format!(
                         "QWORD [{}+{}]",
@@ -258,7 +286,7 @@ impl Transpiler {
                 self.transpile_expr(expression);
             }
             Statement::SystemCall(syscall) => match syscall {
-                SysCalls::Exit(number) => {
+                SysCall::Exit(number) => {
                     self.transpile_expr(number);
                     self.transpile_instructions(vec![Instructions::Syscall]);
                 }
@@ -274,7 +302,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start_time = std::time::Instant::now();
     let mut parser = Parser::new(lexer);
-    let ast = parser.parse_program();
+    let ast = parser.program();
     println!("Parser took {:?}", start_time.elapsed());
     std::fs::create_dir_all("ast")?;
     let mut output_file = std::fs::File::create("ast/out.json")?;

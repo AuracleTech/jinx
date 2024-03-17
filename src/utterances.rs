@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[allow(non_camel_case_types)]
-pub enum SysCalls {
-    Exit(Expressions),
+pub enum SysCall {
+    Exit(Expression),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -13,23 +13,29 @@ pub enum Construct {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Statement {
-    Let(String, Expressions),
-    SystemCall(SysCalls),
+    Let(String, Expression),
+    SystemCall(SysCall),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum _BinaryOperator {
-    _Add,
-    _Sub,
-    _Mul,
-    _Div,
+pub enum ArithmeticOperator {
+    Add,
+    Sub,
+    Mul,
+    Div,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum Expressions {
+pub enum Literal {
     U32(u32),
     _F64(f64),
-    _Boolean(bool),
+    _String(String),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Expression {
+    BinaryOp(ArithmeticOperator, Box<Expression>, Box<Expression>),
     Alias(String),
-    _BinaryOp(_BinaryOperator, Box<Expressions>, Box<Expressions>), // Example of a binary operation expression
+    Literal(Literal),
+    Boolean(bool),
 }
