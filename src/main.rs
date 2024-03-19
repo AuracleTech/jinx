@@ -1,299 +1,13 @@
 mod assembly;
+mod parser;
+mod transpiler;
 mod utterances;
-use assembly::{Instructions, Registers};
-use logos::{Lexer, Logos, Skip};
-use std::{collections::HashMap, fmt::Debug, process::Command};
-use utterances::{ArithmeticOperator, Construct, Expression, Literal};
-use utterances::{Statement, SysCall};
+use logos::Logos;
+use parser::Parser;
+use std::process::Command;
+use transpiler::Transpiler;
 
-#[derive(Logos, Clone, Debug, PartialEq)]
-#[logos(skip r"[ \t\n\f]+")]
-enum Kind {
-    #[regex(r"//.*", |_| Skip, priority = 3)]
-    CommentLine,
-    #[regex(r"/\*[^*]*\*/", |_| Skip, priority = 3)]
-    CommentBlock,
-
-    #[token("let")]
-    KeywordLet,
-
-    #[token("syscall")]
-    SystemCall,
-
-    #[token("(")]
-    ParenthesisOpen,
-    #[token(")")]
-    ParenthesisClose,
-
-    #[token("{")]
-    BracketOpen,
-    #[token("}")]
-    BracketClose,
-
-    #[regex(r"[a-z][a-zA-Z0-9_]*")]
-    AliasSnakeCase,
-    #[regex(r"[0-9]+")]
-    Number,
-
-    #[token("=")]
-    Assign,
-    #[token("+")]
-    Add,
-    #[token("-")]
-    Sub,
-    #[token("*")]
-    Mul,
-    #[token("/")]
-    Div,
-
-    #[token(";")]
-    SemiColon,
-}
-
-#[derive(Debug)]
-enum ParserError {
-    NoStatementsFound,
-}
-
-struct Parser<'a> {
-    lexer: Lexer<'a, Kind>,
-}
-
-impl<'a> Parser<'a> {
-    fn new(lexer: Lexer<'a, Kind>) -> Self {
-        Self { lexer }
-    }
-
-    fn expect_token(&mut self) -> Kind {
-        if let Some(token) = self.lexer.next() {
-            token.expect("expected token but got None")
-        } else {
-            panic!("expected token but got None");
-        }
-    }
-
-    fn expect_token_kind(&mut self, expected: Kind) -> Kind {
-        let kind = self.expect_token();
-        if kind == expected {
-            kind
-        } else {
-            panic!(
-                "expected {:?} but got {:?} value {:?}",
-                expected,
-                kind,
-                self.lexer.slice()
-            );
-        }
-    }
-
-    fn program(&mut self) -> Construct {
-        let mut statements = Vec::new();
-
-        while let Some(kind) = self.lexer.next() {
-            statements.push(self.statement(kind.expect("expected kind but got error")));
-        }
-
-        if statements.is_empty() {
-            panic!("{:?}", ParserError::NoStatementsFound);
-        }
-
-        Construct::Program(statements)
-    }
-
-    fn statement(&mut self, kind: Kind) -> Statement {
-        let statement = match kind {
-            Kind::KeywordLet => self.assign(),
-            Kind::SystemCall => self.syscall(),
-            _ => panic!(
-                "unexpected statement kind {:?} value {:?}",
-                kind,
-                self.lexer.slice()
-            ),
-        };
-        statement
-    }
-
-    fn assign(&mut self) -> Statement {
-        self.expect_token_kind(Kind::AliasSnakeCase);
-        let alias = self.lexer.slice().to_string();
-        let _ = self.expect_token_kind(Kind::Assign);
-
-        Statement::Let(alias, self.expression())
-    }
-
-    fn expression(&mut self) -> Expression {
-        let token = self.expect_token();
-        let left = match token {
-            Kind::Number => {
-                let value = self.lexer.slice().parse().expect("Failed to parse integer");
-                Expression::Literal(Literal::U32(value))
-            }
-            Kind::AliasSnakeCase => Expression::Alias(self.lexer.slice().to_string()),
-            // Kind::ParenthesisOpen => {
-            //     let expr = self.expression();
-            //     left = self.expect_token();
-            //     if left != Kind::ParenthesisClose {
-            //         panic!("Expected ')' after expression, found {:?}", left);
-            //     }
-            //     expr
-            // }
-            _ => panic!("Unexpected token {:?} in expression", token),
-        };
-
-        let next = self.expect_token();
-        let operator = match next {
-            Kind::Add => ArithmeticOperator::Add,
-            Kind::Sub => ArithmeticOperator::Sub,
-            Kind::Mul => ArithmeticOperator::Mul,
-            Kind::Div => ArithmeticOperator::Div,
-            Kind::SemiColon => return left,
-            _ => panic!("Unexpected token {:?} in expression", next),
-        };
-
-        let right = self.expression();
-
-        Expression::BinaryOp(operator, Box::new(left), Box::new(right))
-    }
-
-    fn syscall(&mut self) -> Statement {
-        self.expect_token_kind(Kind::AliasSnakeCase);
-        let value = self.lexer.slice();
-        match value {
-            "exit" => Statement::SystemCall(SysCall::Exit(self.expression())),
-            _ => panic!("unknown syscall token value {:?}", value),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct Var {
-    stack_location: u32,
-}
-
-struct Transpiler {
-    output: String,
-    vars: HashMap<String, Var>,
-
-    stack_len: usize,
-    max_stack_size: usize,
-}
-
-impl Transpiler {
-    fn new() -> Self {
-        let max_stack_size = 100; // TODO: make this configurable
-        Self {
-            output: String::new(),
-            vars: HashMap::new(),
-            stack_len: 0,
-            max_stack_size,
-        }
-    }
-
-    pub fn transpile_instructions(&mut self, instructions: Vec<Instructions>) {
-        for instruction in instructions {
-            match instruction {
-                Instructions::Push(register) => {
-                    self.stack_len += 1;
-
-                    if self.stack_len > self.max_stack_size {
-                        panic!("stack overflow");
-                    }
-
-                    self.output += &format!("\tpush {}\n", register);
-                }
-                Instructions::Pop(register) => {
-                    if self.stack_len == 0 {
-                        panic!("stack underflow");
-                    }
-
-                    self.stack_len -= 1;
-                    self.output += &format!("\tpop {}\n", register);
-                }
-                Instructions::Mov(register, value) => {
-                    self.output += &format!("\tmov {}, {}\n", register, value);
-                }
-                Instructions::Syscall => {
-                    self.transpile_instructions(vec![
-                        Instructions::Mov(Registers::Rax.to_string(), 60),
-                        Instructions::Pop(Registers::Rdi.to_string()),
-                    ]);
-                    self.output += "\tsyscall\n";
-                }
-            }
-        }
-
-        self.output += "\n";
-    }
-
-    fn transpile_construct(&mut self, construct: Construct) -> String {
-        self.output += &format!(
-            "# {} / {}\n\n",
-            chrono::Local::now().format("%H:%M:%S"),
-            chrono::Local::now().format("%e %b %Y"),
-        );
-
-        match construct {
-            Construct::Program(statements) => {
-                self.output += "global _start\n_start:\n";
-                for statement in statements {
-                    self.transpile_statement(statement);
-                }
-            }
-        }
-
-        self.transpile_statement(Statement::SystemCall(SysCall::Exit(Expression::Literal(
-            Literal::U32(0),
-        ))));
-
-        self.output.to_string()
-    }
-
-    fn transpile_expr(&mut self, expression: Expression) {
-        match expression {
-            Expression::Literal(literal) => match literal {
-                Literal::U32(value) => {
-                    self.transpile_instructions(vec![
-                        Instructions::Mov(Registers::Rax.to_string(), value),
-                        Instructions::Push(Registers::Rax.to_string()),
-                    ]);
-                }
-                _ => unimplemented!(),
-            },
-            Expression::Alias(alias) => {
-                if let Some(var) = self.vars.get(&alias) {
-                    self.transpile_instructions(vec![Instructions::Push(format!(
-                        "QWORD [{}+{}]",
-                        Registers::Rsp,
-                        (self.stack_len - var.stack_location as usize - 1) * 8
-                    ))]);
-                } else {
-                    panic!("undeclared alias '{}'", alias);
-                }
-            }
-            _ => unimplemented!(),
-        }
-    }
-
-    fn transpile_statement(&mut self, statement: Statement) {
-        match statement {
-            Statement::Let(alias, expression) => {
-                if let Some(var) = self.vars.get(&alias) {
-                    panic!("alias '{}' already declared {:?}", alias, var);
-                }
-
-                let stack_location = self.stack_len as u32;
-                self.vars.insert(alias.to_owned(), Var { stack_location });
-                self.transpile_expr(expression);
-            }
-            Statement::SystemCall(syscall) => match syscall {
-                SysCall::Exit(number) => {
-                    self.transpile_expr(number);
-                    self.transpile_instructions(vec![Instructions::Syscall]);
-                }
-            },
-        }
-    }
-}
+use crate::utterances::Kind;
 
 const SOURCE: &str = include_str!("../code/code.x");
 
@@ -304,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut parser = Parser::new(lexer);
     let ast = parser.program();
     println!("Parser took {:?}", start_time.elapsed());
+
     std::fs::create_dir_all("ast")?;
     let mut output_file = std::fs::File::create("ast/out.json")?;
     let json = serde_json::to_string(&ast).unwrap();
@@ -311,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start_time = std::time::Instant::now();
     let mut compiler = Transpiler::new();
-    let output = compiler.transpile_construct(ast);
+    let output = compiler.construct(ast);
     println!("Compiler took {:?}", start_time.elapsed());
 
     std::fs::create_dir_all("transpiled")?;
@@ -346,8 +61,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let exit_status = bin.status.code().unwrap();
     println!("Exit status {:?}", exit_status);
-
-    // println!("{:?}", to_string!(SysCalls::exit));
 
     Ok(())
 }
