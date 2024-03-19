@@ -1,4 +1,5 @@
 mod assembly;
+mod ast_display;
 mod parser;
 mod transpiler;
 mod utterances;
@@ -19,6 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ast = parser.program();
     println!("Parser took {:?}", start_time.elapsed());
 
+    println!("{}", ast);
     std::fs::create_dir_all("ast")?;
     let mut output_file = std::fs::File::create("ast/out.json")?;
     let json = serde_json::to_string(&ast).unwrap();
