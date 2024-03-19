@@ -7,8 +7,7 @@ use logos::Logos;
 use parser::Parser;
 use std::process::Command;
 use transpiler::Transpiler;
-
-use crate::utterances::Kind;
+use utterances::Kind;
 
 const SOURCE: &str = include_str!("../code/code.x");
 
