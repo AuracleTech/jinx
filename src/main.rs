@@ -1,4 +1,3 @@
-mod assembly;
 mod ast_display;
 mod parser;
 mod transpiler;
