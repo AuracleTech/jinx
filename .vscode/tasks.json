@@ -5,7 +5,7 @@
 			"label": "cargo run simple",
 			"type": "shell",
 			"command": "cargo",
-			"args": ["run"],
+			"args": ["run", "--", "${file}"],
 			"problemMatcher": ["$rustc"],
 			"group": {
 				"kind": "build",

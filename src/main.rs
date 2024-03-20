@@ -9,58 +9,80 @@ use std::process::Command;
 use transpiler::Transpiler;
 use utterances::Kind;
 
-const SOURCE: &str = include_str!("../code/code.x");
+macro_rules! time_and_print {
+    ($label:expr, $block:expr) => {{
+        let start_time = std::time::Instant::now();
+        let result = $block;
+        println!("{} took {:?}", $label, start_time.elapsed());
+        result
+    }};
+}
+
+const FOLDERS: [&str; 4] = ["ast", "transpiled", "object", "bin"];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let lexer = Kind::lexer(SOURCE);
+    let args: Vec<String> = std::env::args().collect();
 
-    let start_time = std::time::Instant::now();
+    if args.len() != 2 {
+        eprintln!("Incorrect usage. Usage: {} <filename>", args[0]);
+        std::process::exit(1);
+    }
+
+    let filename = &args[1];
+
+    let source_code = std::fs::read_to_string(filename)?;
+
+    for folder in &FOLDERS {
+        std::fs::create_dir_all(folder)?;
+    }
+
+    let lexer = Kind::lexer(&source_code);
+
     let mut parser = Parser::new(lexer);
-    let ast = parser.program();
-    println!("Parser took {:?}", start_time.elapsed());
+    let ast = time_and_print!("Parser", { parser.program() });
 
     println!("{}", ast);
-    std::fs::create_dir_all("ast")?;
-    let mut output_file = std::fs::File::create("ast/out.json")?;
-    let json = serde_json::to_string(&ast).unwrap();
-    std::io::Write::write_all(&mut output_file, json.as_bytes())?;
 
-    let start_time = std::time::Instant::now();
-    let mut compiler = Transpiler::new();
-    let output = compiler.construct(ast);
-    println!("Compiler took {:?}", start_time.elapsed());
+    let mut ast_output = std::fs::File::create("ast/out.json")?;
+    let serialized_ast = serde_json::to_string(&ast).unwrap();
+    std::io::Write::write_all(&mut ast_output, serialized_ast.as_bytes())?;
 
-    std::fs::create_dir_all("transpiled")?;
-    std::fs::create_dir_all("object")?;
-    std::fs::create_dir_all("bin")?;
+    let mut transpiler = Transpiler::new();
+    let transpiled = time_and_print!("Transpiler", { transpiler.construct(ast) });
 
-    let mut output_file = std::fs::File::create("transpiled/out.s")?;
-    std::io::Write::write_all(&mut output_file, output.as_bytes())?;
+    let mut asm_output = std::fs::File::create("transpiled/out.s")?;
+    std::io::Write::write_all(&mut asm_output, transpiled.as_bytes())?;
 
-    let nasm = Command::new("nasm")
+    let assembler = Command::new("nasm")
         .args(&["-felf64", "transpiled/out.s", "-o", "object/out.o"])
         .output()
         .expect("Failed to execute nasm");
-    println!("nasm Command Output: {:?}", nasm);
-    println!("nasm Stdout: {}", String::from_utf8_lossy(&nasm.stdout));
-    println!("nasm Stderr: {}", String::from_utf8_lossy(&nasm.stderr));
+    println!("nasm Command Output: {:?}", assembler);
+    println!(
+        "nasm Stdout: {}",
+        String::from_utf8_lossy(&assembler.stdout)
+    );
+    println!(
+        "nasm Stderr: {}",
+        String::from_utf8_lossy(&assembler.stderr)
+    );
 
-    let ld = Command::new("ld")
+    let linker = Command::new("ld")
         .args(&["object/out.o", "-o", "bin/out"])
         .output()
         .expect("Failed to execute ld");
-    println!("ld Command Output: {:?}", ld);
-    println!("ld Stdout: {}", String::from_utf8_lossy(&ld.stdout));
-    println!("ld Stderr: {}", String::from_utf8_lossy(&ld.stderr));
+    println!("ld Command Output: {:?}", linker);
+    println!("ld Stdout: {}", String::from_utf8_lossy(&linker.stdout));
+    println!("ld Stderr: {}", String::from_utf8_lossy(&linker.stderr));
 
-    let bin = Command::new("./bin/out")
+    let runner = Command::new("./bin/out")
         .output()
         .expect("Failed to execute binary");
-    println!("bin Command Output: {:?}", bin);
-    println!("bin Stdout: {}", String::from_utf8_lossy(&bin.stdout));
-    println!("bin Stderr: {}", String::from_utf8_lossy(&bin.stderr));
+    println!("bin Command Output: {:?}", runner);
+    println!("bin Stdout: {}", String::from_utf8_lossy(&runner.stdout));
+    println!("bin Stderr: {}", String::from_utf8_lossy(&runner.stderr));
 
-    let exit_status = bin.status.code().unwrap();
+    let exit_status = runner.status.code().unwrap();
     println!("Exit status {:?}", exit_status);
 
     Ok(())
